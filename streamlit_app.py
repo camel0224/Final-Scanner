@@ -11,10 +11,20 @@ from typing import Dict, Optional, Any
 from dataclasses import dataclass
 from decimal import Decimal
 import json
+import cv2
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
+import numpy as np
+from pyzbar.pyzbar import decode
+import easyocr
+import io
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Initialize EasyOCR reader (this will download the model on first run)
+if 'ocr_reader' not in st.session_state:
+    st.session_state.ocr_reader = easyocr.Reader(['en'])
 
 @dataclass
 class ProductPrice:
@@ -327,6 +337,64 @@ class ProductSearcher:
             'error': "Lowes search implementation pending"
         }
 
+class VideoTransformer(VideoTransformerBase):
+    def __init__(self):
+        self.last_barcode = None
+        self.last_ocr_text = None
+        self.frame_count = 0
+        self.ocr_interval = 30  # Increased interval for OCR to reduce processing load
+
+    def transform(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        
+        # Scan for barcodes
+        barcodes = decode(img)
+        for barcode in barcodes:
+            # Draw rectangle around barcode
+            points = np.array([barcode.polygon], np.int32)
+            cv2.polylines(img, [points], True, (0, 255, 0), 2)
+            
+            # Store the barcode data
+            self.last_barcode = barcode.data.decode('utf-8')
+            
+            # Draw the barcode data
+            cv2.putText(img, self.last_barcode, (barcode.rect.left, barcode.rect.top - 10),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+        # Perform OCR every few frames to reduce processing load
+        self.frame_count += 1
+        if self.frame_count % self.ocr_interval == 0:
+            try:
+                # Use EasyOCR to detect text
+                results = st.session_state.ocr_reader.readtext(img)
+                
+                # Combine all detected text
+                detected_text = ' '.join([text[1] for text in results])
+                self.last_ocr_text = detected_text
+                
+                # Draw boxes around detected text
+                for (bbox, text, prob) in results:
+                    # Convert bbox points to integers
+                    bbox = np.array(bbox).astype(int)
+                    
+                    # Draw the bounding box
+                    cv2.polylines(img, [bbox], True, (255, 0, 0), 2)
+                    
+                    # Add text above the box
+                    cv2.putText(img, text, (bbox[0][0], bbox[0][1] - 10),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                
+            except Exception as e:
+                logger.error(f"Error in OCR: {str(e)}")
+
+        return img
+
+    def get_scan_data(self):
+        return {
+            'barcode': self.last_barcode,
+            'ocr_text': self.last_ocr_text
+        }
+
 # Initialize session state for inventory data
 if 'inventory_data' not in st.session_state:
     st.session_state.inventory_data = pd.DataFrame(columns=[
@@ -340,125 +408,176 @@ def main():
     # Initialize ProductSearcher
     searcher = ProductSearcher()
     
-    # Create form for product entry
-    with st.form("product_entry_form"):
-        product_number = st.text_input("Product Number")
-        brand_options = ["Kohler", "Toto", "American Standard", "Delta", "Moen", "Other"]
-        brand = st.selectbox("Brand", brand_options)
-        model_name = st.text_input("Model Name")
-        category = st.text_input("Category")
-        quantity = st.number_input("Quantity", min_value=1, value=1)
-        msrp = st.number_input("MSRP", min_value=0.0, value=0.0)
-        notes = st.text_area("Notes")
+    # Add tabs for different input methods
+    tab1, tab2 = st.tabs(["📷 Scan Product", "✍️ Manual Entry"])
+    
+    with tab1:
+        st.header("Scan Product")
+        st.write("Point your camera at the product barcode or text to scan.")
         
-        submit_button = st.form_submit_button("Add Product")
+        # Initialize the webcam scanner
+        ctx = webrtc_streamer(
+            key="product-scanner",
+            video_transformer_factory=VideoTransformer,
+            async_transform=True
+        )
         
-        if submit_button:
-            try:
-                # Validate product number
-                if not product_number:
-                    st.error("Please enter a product number.")
-                    return
+        if ctx.video_transformer:
+            scan_data = ctx.video_transformer.get_scan_data()
+            
+            if scan_data['barcode'] or scan_data['ocr_text']:
+                st.success("Product detected!")
                 
-                # Add product with error handling
-                with st.spinner('Searching retailers for pricing...'):
-                    try:
-                        search_results = asyncio.run(searcher.search_all_retailers(
-                            product_number=product_number,
-                            brand=brand if brand != "Other" else None
-                        ))
+                if scan_data['barcode']:
+                    st.write("📊 Barcode:", scan_data['barcode'])
+                    
+                if scan_data['ocr_text']:
+                    # Try to extract product number using regex patterns
+                    patterns = {
+                        'kohler': r'[Kk]-\d{4}(-\d+)?',
+                        'toto': r'[Cc][Ss][Tt]\d{3,4}[A-Za-z]?',
+                        'american_standard': r'[0-9A-Z]{4,8}',
+                    }
+                    
+                    found_product_number = None
+                    for pattern in patterns.values():
+                        match = re.search(pattern, scan_data['ocr_text'])
+                        if match:
+                            found_product_number = match.group(0)
+                            break
+                    
+                    if found_product_number:
+                        st.write("📝 Product Number:", found_product_number)
                         
-                        if search_results.error:
-                            st.warning(f"Some searches failed: {search_results.error}")
-                        
-                        # Update form with found information
-                        if search_results.brand and brand == "Other":
-                            brand = search_results.brand
-                        if not model_name and search_results.product_name:
-                            model_name = search_results.product_name
-                        if not category and search_results.category:
-                            category = search_results.category
+                        # Add button to use scanned product number
+                        if st.button("Use This Product Number"):
+                            st.session_state['scanned_product'] = found_product_number
+                            st.experimental_rerun()
 
-                        # Create new row with enhanced information
-                        new_row = {
-                            'Date Added': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            'Product Number': product_number,
-                            'Brand': brand,
-                            'Model Name': model_name,
-                            'Category': category,
-                            'Quantity': quantity,
-                            'MSRP': msrp,
-                            'Notes': notes
-                        }
-
-                        # Add retailer information
-                        for retailer, price_info in search_results.retailers.items():
-                            new_row[f'{retailer.title()} Price'] = price_info.raw_price
-                            new_row[f'{retailer.title()} Link'] = price_info.url
-                            new_row[f'{retailer.title()} In Stock'] = 'Yes' if price_info.in_stock else 'No'
-
-                        # Add to inventory
-                        st.session_state.inventory_data = pd.concat([
-                            st.session_state.inventory_data,
-                            pd.DataFrame([new_row])
-                        ], ignore_index=True)
-
-                        # Show success message with details
-                        st.success("Product added to inventory!")
-                        
-                        # Show price comparison and retailer links in a table
-                        if search_results.retailers:
-                            st.subheader("Price Comparison")
+    with tab2:
+        st.header("Manual Product Entry")
+        
+        # Create form for product entry
+        with st.form("product_entry_form"):
+            # Pre-fill product number if scanned
+            initial_product_number = st.session_state.get('scanned_product', '')
+            product_number = st.text_input("Product Number", value=initial_product_number)
+            brand_options = ["Kohler", "Toto", "American Standard", "Delta", "Moen", "Other"]
+            brand = st.selectbox("Brand", brand_options)
+            model_name = st.text_input("Model Name")
+            category = st.text_input("Category")
+            quantity = st.number_input("Quantity", min_value=1, value=1)
+            msrp = st.number_input("MSRP", min_value=0.0, value=0.0)
+            notes = st.text_area("Notes")
+            
+            submit_button = st.form_submit_button("Add Product")
+            
+            if submit_button:
+                try:
+                    # Validate product number
+                    if not product_number:
+                        st.error("Please enter a product number.")
+                        return
+                    
+                    # Add product with error handling
+                    with st.spinner('Searching retailers for pricing...'):
+                        try:
+                            search_results = asyncio.run(searcher.search_all_retailers(
+                                product_number=product_number,
+                                brand=brand if brand != "Other" else None
+                            ))
                             
-                            # Create a price comparison table
-                            comparison_data = []
+                            if search_results.error:
+                                st.warning(f"Some searches failed: {search_results.error}")
+                            
+                            # Update form with found information
+                            if search_results.brand and brand == "Other":
+                                brand = search_results.brand
+                            if not model_name and search_results.product_name:
+                                model_name = search_results.product_name
+                            if not category and search_results.category:
+                                category = search_results.category
+
+                            # Create new row with enhanced information
+                            new_row = {
+                                'Date Added': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                'Product Number': product_number,
+                                'Brand': brand,
+                                'Model Name': model_name,
+                                'Category': category,
+                                'Quantity': quantity,
+                                'MSRP': msrp,
+                                'Notes': notes
+                            }
+
+                            # Add retailer information
                             for retailer, price_info in search_results.retailers.items():
-                                comparison_data.append({
-                                    "Retailer": retailer.title(),
-                                    "Price": price_info.raw_price,
-                                    "In Stock": "Yes" if price_info.in_stock else "No",
-                                    "Link": price_info.url
-                                })
+                                new_row[f'{retailer.title()} Price'] = price_info.raw_price
+                                new_row[f'{retailer.title()} Link'] = price_info.url
+                                new_row[f'{retailer.title()} In Stock'] = 'Yes' if price_info.in_stock else 'No'
+
+                            # Add to inventory
+                            st.session_state.inventory_data = pd.concat([
+                                st.session_state.inventory_data,
+                                pd.DataFrame([new_row])
+                            ], ignore_index=True)
+
+                            # Show success message with details
+                            st.success("Product added to inventory!")
                             
-                            if comparison_data:
-                                comparison_df = pd.DataFrame(comparison_data)
+                            # Show price comparison and retailer links in a table
+                            if search_results.retailers:
+                                st.subheader("Price Comparison")
                                 
-                                # Display the comparison table
-                                st.dataframe(
-                                    comparison_df,
-                                    column_config={
-                                        "Link": st.column_config.LinkColumn("Store Link"),
-                                        "Price": st.column_config.TextColumn("Price", help="Current price at retailer"),
-                                        "In Stock": st.column_config.TextColumn("Availability")
-                                    },
-                                    hide_index=True
-                                )
+                                # Create a price comparison table
+                                comparison_data = []
+                                for retailer, price_info in search_results.retailers.items():
+                                    comparison_data.append({
+                                        "Retailer": retailer.title(),
+                                        "Price": price_info.raw_price,
+                                        "In Stock": "Yes" if price_info.in_stock else "No",
+                                        "Link": price_info.url
+                                    })
                                 
-                                # Show the best price
-                                try:
-                                    best_price = min(
-                                        (price_info for price_info in search_results.retailers.values() if price_info.price is not None),
-                                        key=lambda x: x.price,
-                                        default=None
+                                if comparison_data:
+                                    comparison_df = pd.DataFrame(comparison_data)
+                                    
+                                    # Display the comparison table
+                                    st.dataframe(
+                                        comparison_df,
+                                        column_config={
+                                            "Link": st.column_config.LinkColumn("Store Link"),
+                                            "Price": st.column_config.TextColumn("Price", help="Current price at retailer"),
+                                            "In Stock": st.column_config.TextColumn("Availability")
+                                        },
+                                        hide_index=True
                                     )
-                                    if best_price:
-                                        st.info(f"💰 Best price found: ${best_price.price} at {best_price.url}")
-                                except Exception as e:
-                                    logger.error(f"Error calculating best price: {str(e)}")
+                                    
+                                    # Show the best price
+                                    try:
+                                        best_price = min(
+                                            (price_info for price_info in search_results.retailers.values() if price_info.price is not None),
+                                            key=lambda x: x.price,
+                                            default=None
+                                        )
+                                        if best_price:
+                                            st.info(f"💰 Best price found: ${best_price.price} at {best_price.url}")
+                                    except Exception as e:
+                                        logger.error(f"Error calculating best price: {str(e)}")
 
-                        # Show specifications if available
-                        if search_results.specifications:
-                            with st.expander("Product Specifications"):
-                                for key, value in search_results.specifications.items():
-                                    st.text(f"{key}: {value}")
+                            # Show specifications if available
+                            if search_results.specifications:
+                                with st.expander("Product Specifications"):
+                                    for key, value in search_results.specifications.items():
+                                        st.text(f"{key}: {value}")
 
-                    except Exception as e:
-                        st.error(f"Error adding product: {str(e)}")
-                        logger.error(f"Error adding product {product_number}: {str(e)}", exc_info=True)
+                        except Exception as e:
+                            st.error(f"Error adding product: {str(e)}")
+                            logger.error(f"Error adding product {product_number}: {str(e)}", exc_info=True)
 
-            except Exception as e:
-                st.error(f"Error processing form: {str(e)}")
-                logger.error(f"Error processing form: {str(e)}", exc_info=True)
+                except Exception as e:
+                    st.error(f"Error processing form: {str(e)}")
+                    logger.error(f"Error processing form: {str(e)}", exc_info=True)
 
     # Display inventory table
     if not st.session_state.inventory_data.empty:
