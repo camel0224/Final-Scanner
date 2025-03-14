@@ -483,15 +483,32 @@ def main():
     # Add tabs for different input methods
     tab1, tab2 = st.tabs(["📷 Scan Product", "✍️ Manual Entry"])
     
-    with tab1:
+        with tab1:
         st.header("Scan Product")
         st.write("Point your camera at the product barcode or text to scan.")
         
-        # Initialize the webcam scanner
+        # Initialize the webcam scanner with specific configurations
         ctx = webrtc_streamer(
             key="product-scanner",
             video_transformer_factory=VideoTransformer,
-            async_transform=True
+            async_transform=True,
+            media_stream_constraints={
+                "video": {
+                    "width": 640,
+                    "height": 480,
+                    "facingMode": "environment"  # Use back camera if available
+                },
+                "audio": False  # Disable audio
+            },
+            rtc_configuration={  # Add STUN/TURN servers for better connectivity
+                "iceServers": [
+                    {"urls": ["stun:stun.l.google.com:19302"]}
+                ]
+            },
+            video_html_attrs={
+                "style": {"width": "100%", "height": "100%"},
+                "controls": False,
+            }
         )
         
         if ctx.video_transformer:
@@ -525,7 +542,17 @@ def main():
                         if st.button("Use This Product Number"):
                             st.session_state['scanned_product'] = found_product_number
                             st.experimental_rerun()
-
+        else:
+            st.warning("Camera not available. Please check your camera permissions and try again.")
+            # Add troubleshooting tips
+            with st.expander("Troubleshooting Tips"):
+                st.markdown("""
+                If you can't see your camera feed:
+                1. Make sure you've allowed camera access in your browser
+                2. Try refreshing the page
+                3. Check if another application is using your camera
+                4. Try using a different browser (Chrome or Firefox recommended)
+                """)
     with tab2:
         st.header("Manual Product Entry")
         
