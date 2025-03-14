@@ -483,7 +483,7 @@ def main():
     # Add tabs for different input methods
     tab1, tab2 = st.tabs(["📷 Scan Product", "✍️ Manual Entry"])
     
-        with tab1:
+    with tab1:
         st.header("Scan Product")
         st.write("Point your camera at the product barcode or text to scan.")
         
