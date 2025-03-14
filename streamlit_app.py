@@ -145,7 +145,7 @@ class ProductSearcher:
                                 'retailers': {
                                     'ferguson': ProductPrice(
                                         price=self.clean_price(product.get('price')),
-                                        url=search_url,  # Use the search URL since we have it
+                                        url=search_url,
                                         in_stock=product.get('in_stock', False),
                                         model_number=product_number,
                                         sku=product.get('sku'),
