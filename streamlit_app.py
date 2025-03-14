@@ -135,7 +135,7 @@ class ProductSearcher:
                                 'retailers': {
                                     'ferguson': ProductPrice(
                                         price=self.clean_price(product.get('price')),
-                                        url=product.get('url'),
+                                        url=search_url,  # Use the search URL since we have it
                                         in_stock=product.get('in_stock', False),
                                         model_number=product_number,
                                         sku=product.get('sku'),
@@ -182,6 +182,11 @@ class ProductSearcher:
             brand_elem = product_elem.find('span', {'class': 'brand'})
             if brand_elem:
                 product['brand'] = brand_elem.text.strip()
+            
+            # Check if in stock
+            stock_elem = product_elem.find('span', {'class': 'stock-status'})
+            if stock_elem:
+                product['in_stock'] = 'in stock' in stock_elem.text.lower()
         
         return product
 
@@ -254,30 +259,72 @@ class ProductSearcher:
 
     async def search_homedepot(self, product_number: str, brand: Optional[str] = None) -> Dict:
         """Search Home Depot for product information"""
-        # Placeholder for Home Depot search implementation
+        base_url = "https://www.homedepot.com"
+        search_url = f"{base_url}/s/{quote_plus(f'{brand or ''} {product_number}')}"
+        
+        async with aiohttp.ClientSession(headers=self.headers) as session:
+            try:
+                async with session.get(search_url) as response:
+                    if response.status == 200:
+                        html = await response.text()
+                        # Add Home Depot specific scraping here
+                        return {
+                            'product_name': None,
+                            'brand': brand,
+                            'model_number': product_number,
+                            'category': None,
+                            'retailers': {
+                                'homedepot': ProductPrice(
+                                    price=None,
+                                    url=search_url,
+                                    in_stock=False,
+                                    model_number=product_number,
+                                    sku=None,
+                                    raw_price='Check website'
+                                )
+                            }
+                        }
+            except Exception as e:
+                self.logger.error(f"Error searching Home Depot: {str(e)}")
+        
         return {
-            'product_name': None,
-            'brand': None,
-            'model_number': product_number,
-            'category': None,
             'retailers': {},
-            'description': None,
-            'specifications': {},
-            'error': "Home Depot search not implemented yet"
+            'error': "Home Depot search implementation pending"
         }
 
     async def search_lowes(self, product_number: str, brand: Optional[str] = None) -> Dict:
         """Search Lowes for product information"""
-        # Placeholder for Lowes search implementation
+        base_url = "https://www.lowes.com"
+        search_url = f"{base_url}/search?searchTerm={quote_plus(f'{brand or ''} {product_number}')}"
+        
+        async with aiohttp.ClientSession(headers=self.headers) as session:
+            try:
+                async with session.get(search_url) as response:
+                    if response.status == 200:
+                        html = await response.text()
+                        # Add Lowes specific scraping here
+                        return {
+                            'product_name': None,
+                            'brand': brand,
+                            'model_number': product_number,
+                            'category': None,
+                            'retailers': {
+                                'lowes': ProductPrice(
+                                    price=None,
+                                    url=search_url,
+                                    in_stock=False,
+                                    model_number=product_number,
+                                    sku=None,
+                                    raw_price='Check website'
+                                )
+                            }
+                        }
+            except Exception as e:
+                self.logger.error(f"Error searching Lowes: {str(e)}")
+        
         return {
-            'product_name': None,
-            'brand': None,
-            'model_number': product_number,
-            'category': None,
             'retailers': {},
-            'description': None,
-            'specifications': {},
-            'error': "Lowes search not implemented yet"
+            'error': "Lowes search implementation pending"
         }
 
 # Initialize session state for inventory data
@@ -359,11 +406,45 @@ def main():
                         # Show success message with details
                         st.success("Product added to inventory!")
                         
-                        # Show retailer links
-                        st.subheader("Retailer Links")
-                        for retailer, price_info in search_results.retailers.items():
-                            if price_info.url:
-                                st.markdown(f"[View on {retailer.title()}]({price_info.url})")
+                        # Show price comparison and retailer links in a table
+                        if search_results.retailers:
+                            st.subheader("Price Comparison")
+                            
+                            # Create a price comparison table
+                            comparison_data = []
+                            for retailer, price_info in search_results.retailers.items():
+                                comparison_data.append({
+                                    "Retailer": retailer.title(),
+                                    "Price": price_info.raw_price,
+                                    "In Stock": "Yes" if price_info.in_stock else "No",
+                                    "Link": price_info.url
+                                })
+                            
+                            if comparison_data:
+                                comparison_df = pd.DataFrame(comparison_data)
+                                
+                                # Display the comparison table
+                                st.dataframe(
+                                    comparison_df,
+                                    column_config={
+                                        "Link": st.column_config.LinkColumn("Store Link"),
+                                        "Price": st.column_config.TextColumn("Price", help="Current price at retailer"),
+                                        "In Stock": st.column_config.TextColumn("Availability")
+                                    },
+                                    hide_index=True
+                                )
+                                
+                                # Show the best price
+                                try:
+                                    best_price = min(
+                                        (price_info for price_info in search_results.retailers.values() if price_info.price is not None),
+                                        key=lambda x: x.price,
+                                        default=None
+                                    )
+                                    if best_price:
+                                        st.info(f"💰 Best price found: ${best_price.price} at {best_price.url}")
+                                except Exception as e:
+                                    logger.error(f"Error calculating best price: {str(e)}")
 
                         # Show specifications if available
                         if search_results.specifications:
