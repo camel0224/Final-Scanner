@@ -342,50 +342,106 @@ class VideoTransformer(VideoTransformerBase):
         self.last_barcode = None
         self.last_ocr_text = None
         self.frame_count = 0
-        self.ocr_interval = 30  # Increased interval for OCR to reduce processing load
+        self.ocr_interval = 15  # Reduced interval for more frequent scanning
+        self.last_successful_scan = 0
+        self.scan_cooldown = 30  # Frames to wait before showing the same result again
 
     def transform(self, frame):
         img = frame.to_ndarray(format="bgr24")
         
-        # Scan for barcodes
-        barcodes = decode(img)
-        for barcode in barcodes:
-            # Draw rectangle around barcode
-            points = np.array([barcode.polygon], np.int32)
-            cv2.polylines(img, [points], True, (0, 255, 0), 2)
-            
-            # Store the barcode data
-            self.last_barcode = barcode.data.decode('utf-8')
-            
-            # Draw the barcode data
-            cv2.putText(img, self.last_barcode, (barcode.rect.left, barcode.rect.top - 10),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        # Enhance image for better detection
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        enhanced = cv2.convertScaleAbs(gray, alpha=1.5, beta=0)  # Increase contrast
+        
+        # Scan for barcodes with enhanced image
+        try:
+            barcodes = decode(enhanced)
+            for barcode in barcodes:
+                # Draw rectangle around barcode
+                points = np.array([barcode.polygon], np.int32)
+                cv2.polylines(img, [points], True, (0, 255, 0), 2)
+                
+                # Store the barcode data
+                barcode_data = barcode.data.decode('utf-8')
+                if barcode_data != self.last_barcode or self.frame_count - self.last_successful_scan > self.scan_cooldown:
+                    self.last_barcode = barcode_data
+                    self.last_successful_scan = self.frame_count
+                
+                # Draw the barcode data with better visibility
+                cv2.putText(img, self.last_barcode, 
+                          (barcode.rect.left, barcode.rect.top - 10),
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                
+                # Draw a filled rectangle for better text visibility
+                text_size = cv2.getTextSize(self.last_barcode, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
+                cv2.rectangle(img, 
+                            (barcode.rect.left - 2, barcode.rect.top - text_size[1] - 15),
+                            (barcode.rect.left + text_size[0] + 2, barcode.rect.top - 5),
+                            (0, 0, 0), -1)
+                cv2.putText(img, self.last_barcode,
+                          (barcode.rect.left, barcode.rect.top - 10),
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        except Exception as e:
+            logger.error(f"Error in barcode detection: {str(e)}")
 
-        # Perform OCR every few frames to reduce processing load
+        # Perform OCR more frequently
         self.frame_count += 1
         if self.frame_count % self.ocr_interval == 0:
             try:
-                # Use EasyOCR to detect text
-                results = st.session_state.ocr_reader.readtext(img)
+                # Use both original and enhanced images for OCR
+                results = st.session_state.ocr_reader.readtext(enhanced)
                 
-                # Combine all detected text
-                detected_text = ' '.join([text[1] for text in results])
-                self.last_ocr_text = detected_text
-                
-                # Draw boxes around detected text
-                for (bbox, text, prob) in results:
-                    # Convert bbox points to integers
-                    bbox = np.array(bbox).astype(int)
+                if results:
+                    # Filter results with confidence threshold
+                    filtered_results = [r for r in results if r[2] > 0.45]  # Confidence threshold
                     
-                    # Draw the bounding box
-                    cv2.polylines(img, [bbox], True, (255, 0, 0), 2)
+                    # Combine all detected text
+                    detected_text = ' '.join([text[1] for text in filtered_results])
                     
-                    # Add text above the box
-                    cv2.putText(img, text, (bbox[0][0], bbox[0][1] - 10),
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                    # Update only if new text is found or enough frames have passed
+                    if (detected_text != self.last_ocr_text and detected_text.strip()) or \
+                       (self.frame_count - self.last_successful_scan > self.scan_cooldown):
+                        self.last_ocr_text = detected_text
+                        self.last_successful_scan = self.frame_count
+                    
+                    # Draw boxes around detected text with improved visibility
+                    for (bbox, text, prob) in filtered_results:
+                        # Convert bbox points to integers
+                        bbox = np.array(bbox).astype(int)
+                        
+                        # Draw the bounding box
+                        cv2.polylines(img, [bbox], True, (255, 0, 0), 2)
+                        
+                        # Draw a filled rectangle for better text visibility
+                        text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
+                        cv2.rectangle(img, 
+                                    (bbox[0][0] - 2, bbox[0][1] - text_size[1] - 15),
+                                    (bbox[0][0] + text_size[0] + 2, bbox[0][1] - 5),
+                                    (0, 0, 0), -1)
+                        
+                        # Add text above the box with better visibility
+                        cv2.putText(img, f"{text} ({prob:.2f})",
+                                  (bbox[0][0], bbox[0][1] - 10),
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
                 
             except Exception as e:
                 logger.error(f"Error in OCR: {str(e)}")
+
+        # Add scanning guide overlay
+        height, width = img.shape[:2]
+        guide_color = (255, 255, 255)
+        guide_thickness = 2
+        
+        # Draw scanning area guide
+        margin = 50
+        cv2.rectangle(img, (margin, margin), (width - margin, height - margin), guide_color, guide_thickness)
+        
+        # Add helper text
+        helper_text = "Center barcode or text in box"
+        text_size = cv2.getTextSize(helper_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
+        text_x = (width - text_size[0]) // 2
+        cv2.putText(img, helper_text, (text_x, height - 20),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, guide_color, 2)
 
         return img
 
@@ -394,7 +450,6 @@ class VideoTransformer(VideoTransformerBase):
             'barcode': self.last_barcode,
             'ocr_text': self.last_ocr_text
         }
-
 # Initialize session state for inventory data
 if 'inventory_data' not in st.session_state:
     st.session_state.inventory_data = pd.DataFrame(columns=[
