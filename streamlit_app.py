@@ -18,10 +18,27 @@ from pyzbar.pyzbar import decode
 import easyocr
 import io
 
+# Add custom CSS for better video display
+st.set_page_config(page_title="Toilet Box Scanner", layout="wide")
+
+# Custom CSS to improve video display
+st.markdown("""
+    <style>
+    .stVideo {
+        width: 100%;
+        max-width: 800px;
+        margin: 0 auto;
+    }
+    .stVideo > video {
+        width: 100%;
+        height: auto;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 # Initialize EasyOCR reader (this will download the model on first run)
 if 'ocr_reader' not in st.session_state:
     st.session_state.ocr_reader = easyocr.Reader(['en'])
